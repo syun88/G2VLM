@@ -45,18 +45,25 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
+from modeling.flash_attn_compat import flash_attn_varlen_func
 from .configuration_qwen2_vl import Qwen2VLConfig, Qwen2VLVisionConfig
 
 
 if is_flash_attn_2_available():
-    from flash_attn import flash_attn_varlen_func
-
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
 else:
-    flash_attn_varlen_func = None
+    _flash_attention_forward = None
 
 
 logger = logging.get_logger(__name__)
+
+
+def _preferred_attn_dtype(device: torch.device) -> torch.dtype:
+    if device.type == "cuda":
+        return torch.bfloat16
+    if device.type == "mps":
+        return torch.float32
+    return torch.float32
 
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half
@@ -184,9 +191,10 @@ class VisionAttention(nn.Module):
         for i in range(1, len(cu_seqlens)):
             attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 0
 
-        q = q.transpose(0, 1).to(torch.bfloat16)
-        k = k.transpose(0, 1).to(torch.bfloat16) 
-        v = v.transpose(0, 1).to(torch.bfloat16)
+        attn_dtype = _preferred_attn_dtype(q.device)
+        q = q.transpose(0, 1).to(attn_dtype)
+        k = k.transpose(0, 1).to(attn_dtype)
+        v = v.transpose(0, 1).to(attn_dtype)
         attn_weights = torch.matmul(q, k.transpose(1, 2)) / math.sqrt(self.head_dim)
         attn_weights = attn_weights + attention_mask
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
@@ -228,9 +236,10 @@ class VisionFlashAttention2(nn.Module):
         q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
 
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        q = q.to(torch.bfloat16)
-        k = k.to(torch.bfloat16) 
-        v = v.to(torch.bfloat16) 
+        attn_dtype = _preferred_attn_dtype(q.device)
+        q = q.to(attn_dtype)
+        k = k.to(attn_dtype)
+        v = v.to(attn_dtype)
         attn_output = flash_attn_varlen_func(q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen).reshape(
             seq_length, -1
         )
@@ -271,9 +280,10 @@ class VisionSdpaAttention(nn.Module):
         attention_mask = torch.zeros([1, seq_length, seq_length], device=q.device, dtype=torch.bool)
         for i in range(1, len(cu_seqlens)):
             attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = True
-        q = q.transpose(0, 1).to(torch.bfloat16)
-        k = k.transpose(0, 1).to(torch.bfloat16) 
-        v = v.transpose(0, 1).to(torch.bfloat16) 
+        attn_dtype = _preferred_attn_dtype(q.device)
+        q = q.transpose(0, 1).to(attn_dtype)
+        k = k.transpose(0, 1).to(attn_dtype)
+        v = v.transpose(0, 1).to(attn_dtype)
         attn_output = F.scaled_dot_product_attention(q, k, v, attention_mask, dropout_p=0.0)
         attn_output = attn_output.transpose(0, 1)
         attn_output = attn_output.reshape(seq_length, -1)
@@ -291,6 +301,9 @@ QWEN2_VL_VISION_ATTENTION_CLASSES = {
 class Qwen2VLVisionBlock(nn.Module):
     def __init__(self, config, attn_implementation: str = "sdpa") -> None:
         super().__init__()
+        if attn_implementation == "flash_attention_2" and not is_flash_attn_2_available():
+            logger.warning_once("flash-attn is unavailable; falling back to SDPA attention.")
+            attn_implementation = "sdpa"
         self.norm1 = LayerNorm(config.embed_dim, eps=1e-6)
         self.norm2 = LayerNorm(config.embed_dim, eps=1e-6)
         mlp_hidden_dim = int(config.embed_dim * config.mlp_ratio)

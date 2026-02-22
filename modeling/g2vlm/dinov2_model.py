@@ -12,6 +12,7 @@ import collections.abc
 
 import torch
 from torch import nn
+from contextlib import nullcontext
 from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 from transformers.activations import ACT2FN
@@ -19,7 +20,7 @@ from transformers.pytorch_utils import find_pruneable_heads_and_indices, prune_l
 
 from modeling.dinov2_with_registers.configuration_dinov2_with_registers import Dinov2WithRegistersConfig 
 from modeling.dinov2_with_registers.modeling_dinov2_with_registers import Dinov2WithRegistersSelfAttention, Dinov2WithRegistersPreTrainedModel, Dinov2WithRegistersEmbeddings, Dinov2WithRegistersPatchEmbeddings
-from flash_attn import flash_attn_varlen_func
+from modeling.flash_attn_compat import flash_attn_varlen_func
 def check_inf_nan_debug(input_tensor, loss_name="default", hard_max=100):
     """
     Checks if 'input_tensor' contains inf or nan values and clamps extreme values.
@@ -68,7 +69,12 @@ class Dinov2WithRegistersSelfAttention2(Dinov2WithRegistersSelfAttention):
         query_states = query_states.view(total_q_len, self.num_attention_heads, self.attention_head_size)
         key_states = key_states.view(total_q_len, self.num_attention_heads, self.attention_head_size)
         value_states = value_states.view(total_q_len, self.num_attention_heads, self.attention_head_size)
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        autocast_ctx = (
+            torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+            if query_states.device.type == "cuda"
+            else nullcontext()
+        )
+        with autocast_ctx:
             context_layer = flash_attn_varlen_func(
                 query_states,
                 key_states,

@@ -20,7 +20,7 @@ from transformers.utils import ModelOutput
 from typing import Union
 from torch import Tensor
 
-from flash_attn import flash_attn_varlen_func
+from modeling.flash_attn_compat import flash_attn_varlen_func
 from modeling.qwen2vl.modeling_qwen2_vl import (
     Qwen2VLAttention, 
     Qwen2MLP, 
@@ -35,6 +35,14 @@ from modeling.qwen2vl.configuration_qwen2_vl import Qwen2VLVisionConfig
 torch._dynamo.config.cache_size_limit = 512
 torch._dynamo.config.accumulated_cache_size_limit = 4096
 flex_attention = torch.compile(flex_attention)
+
+
+def _preferred_attn_dtype(device: torch.device) -> torch.dtype:
+    if device.type == "cuda":
+        return torch.bfloat16
+    if device.type == "mps":
+        return torch.float32
+    return torch.float32
 
 
 class LayerScale(nn.Module):
@@ -319,12 +327,13 @@ class PackedAttention(Qwen2VLAttention):
             for query_states, key_states, value_states, attention_mask_per_sample in zip(
                 unpacked_query_states, unpacked_key_states, unpacked_value_states, attention_mask
             ):
+                attn_dtype = _preferred_attn_dtype(query_states.device)
                 with sdpa_kernel(backends=[SDPBackend.EFFICIENT_ATTENTION]):
                     attn_output = scaled_dot_product_attention(
-                        query_states.to(torch.bfloat16).unsqueeze(0), 
-                        key_states.to(torch.bfloat16).unsqueeze(0), 
-                        value_states.to(torch.bfloat16).unsqueeze(0),
-                        attention_mask_per_sample.to(torch.bfloat16).unsqueeze(0),
+                        query_states.to(attn_dtype).unsqueeze(0),
+                        key_states.to(attn_dtype).unsqueeze(0),
+                        value_states.to(attn_dtype).unsqueeze(0),
+                        attention_mask_per_sample.to(attn_dtype).unsqueeze(0),
                     )
                 upacked_attn_output.append(attn_output.squeeze(0))
             packed_attn_output = torch.cat(upacked_attn_output, dim=1)
@@ -372,9 +381,10 @@ class PackedAttention(Qwen2VLAttention):
             packed_query_states, packed_key_states, packed_cos, packed_sin, self.rope_scaling["mrope_section"], unsqueeze_dim=1
         )
 
-        packed_query_states = packed_query_states.to(torch.bfloat16)
-        packed_key_states = packed_key_states.to(torch.bfloat16)
-        packed_value_states = packed_value_states.to(torch.bfloat16)
+        attn_dtype = _preferred_attn_dtype(packed_query_states.device)
+        packed_query_states = packed_query_states.to(attn_dtype)
+        packed_key_states = packed_key_states.to(attn_dtype)
+        packed_value_states = packed_value_states.to(attn_dtype)
 
         if past_key_values is not None and past_key_values.key_cache[self.layer_idx] is not None:
             past_key_states = past_key_values.key_cache[self.layer_idx]
@@ -521,12 +531,13 @@ class PackedAttentionMoT(Qwen2VLAttention):
             for query_states, key_states, value_states, attention_mask_per_sample in zip(
                 unpacked_query_states, unpacked_key_states, unpacked_value_states, attention_mask
             ):
+                attn_dtype = _preferred_attn_dtype(query_states.device)
                 with sdpa_kernel(backends=[SDPBackend.EFFICIENT_ATTENTION]):
                     attn_output = scaled_dot_product_attention(
-                        query_states.to(torch.bfloat16).unsqueeze(0), 
-                        key_states.to(torch.bfloat16).unsqueeze(0), 
-                        value_states.to(torch.bfloat16).unsqueeze(0),
-                        attention_mask_per_sample.to(torch.bfloat16).unsqueeze(0),
+                        query_states.to(attn_dtype).unsqueeze(0),
+                        key_states.to(attn_dtype).unsqueeze(0),
+                        value_states.to(attn_dtype).unsqueeze(0),
+                        attention_mask_per_sample.to(attn_dtype).unsqueeze(0),
                     )
                 upacked_attn_output.append(attn_output.squeeze(0))
             packed_attn_output = torch.cat(upacked_attn_output, dim=1)
@@ -576,7 +587,7 @@ class PackedAttentionMoT(Qwen2VLAttention):
             packed_key_states = self.k_norm(packed_key_states)
 
         elif mode == 'geo':
-            packed_query_sequence = packed_query_sequence.to(torch.bfloat16)
+            packed_query_sequence = packed_query_sequence.to(_preferred_attn_dtype(packed_query_sequence.device))
             packed_query_states = packed_query_sequence.new_zeros((packed_query_sequence.shape[0], self.num_heads * self.head_dim))
             packed_key_states = packed_query_sequence.new_zeros((packed_query_sequence.shape[0], self.num_key_value_heads * self.head_dim))
             packed_value_states = packed_query_sequence.new_zeros((packed_query_sequence.shape[0], self.num_key_value_heads * self.head_dim))
@@ -614,9 +625,10 @@ class PackedAttentionMoT(Qwen2VLAttention):
             packed_query_states, packed_key_states, packed_cos, packed_sin, self.rope_scaling["mrope_section"], unsqueeze_dim=1
         )
 
-        packed_query_states = packed_query_states.to(torch.bfloat16).transpose(0, 1) #transpose back 
-        packed_key_states = packed_key_states.to(torch.bfloat16).transpose(0, 1)
-        packed_value_states = packed_value_states.to(torch.bfloat16)
+        attn_dtype = _preferred_attn_dtype(packed_query_states.device)
+        packed_query_states = packed_query_states.to(attn_dtype).transpose(0, 1) #transpose back 
+        packed_key_states = packed_key_states.to(attn_dtype).transpose(0, 1)
+        packed_value_states = packed_value_states.to(attn_dtype)
 
         if past_key_values is not None and past_key_values.key_cache[self.layer_idx] is not None:
             past_key_states = past_key_values.key_cache[self.layer_idx]
@@ -882,7 +894,9 @@ class Qwen2VLMoTDecoderLayer(nn.Module):
 
         if self.layer_scale:
             if mode == "geo":
-                packed_query_sequence[packed_geo_token_indexes] = self.ls1(packed_query_sequence[packed_geo_token_indexes]).to(torch.bfloat16)
+                packed_query_sequence[packed_geo_token_indexes] = self.ls1(
+                    packed_query_sequence[packed_geo_token_indexes]
+                ).to(_preferred_attn_dtype(packed_query_sequence.device))
 
         packed_query_sequence = residual + packed_query_sequence
 
@@ -894,17 +908,20 @@ class Qwen2VLMoTDecoderLayer(nn.Module):
         elif mode == "geo":
             packed_text_query_sequence = packed_query_sequence[packed_text_indexes]
             packed_vae_query_sequence = packed_query_sequence[packed_geo_token_indexes]
-            packed_text_query_sequence = self.post_attention_layernorm(packed_text_query_sequence).to(torch.bfloat16)
-            packed_vae_query_sequence = self.post_attention_layernorm_moe_geo(packed_vae_query_sequence).to(torch.bfloat16)
+            attn_dtype = _preferred_attn_dtype(packed_query_sequence.device)
+            packed_text_query_sequence = self.post_attention_layernorm(packed_text_query_sequence).to(attn_dtype)
+            packed_vae_query_sequence = self.post_attention_layernorm_moe_geo(packed_vae_query_sequence).to(attn_dtype)
 
-            packed_query_sequence_ = torch.zeros_like(packed_query_sequence).to(torch.bfloat16)
+            packed_query_sequence_ = torch.zeros_like(packed_query_sequence).to(attn_dtype)
             packed_query_sequence_[packed_text_indexes] = self.mlp(packed_text_query_sequence)
             packed_query_sequence_[packed_geo_token_indexes] = self.mlp_moe_geo(packed_vae_query_sequence)
             packed_query_sequence = packed_query_sequence_
 
         if self.layer_scale:
             if mode =='geo':
-                packed_query_sequence[packed_geo_token_indexes] = self.ls2(packed_query_sequence[packed_geo_token_indexes]).to(torch.bfloat16)
+                packed_query_sequence[packed_geo_token_indexes] = self.ls2(
+                    packed_query_sequence[packed_geo_token_indexes]
+                ).to(_preferred_attn_dtype(packed_query_sequence.device))
 
         packed_query_sequence = residual + packed_query_sequence
         return packed_query_sequence, past_key_values
@@ -1003,7 +1020,9 @@ class Qwen2VLMoEDecoderLayer(nn.Module):
         if mode == "und":
             packed_query_sequence = self.mlp(packed_query_sequence)
         elif mode == "geo":
-            packed_query_sequence_ = torch.zeros_like(packed_query_sequence).to(torch.bfloat16)
+            packed_query_sequence_ = torch.zeros_like(packed_query_sequence).to(
+                _preferred_attn_dtype(packed_query_sequence.device)
+            )
             packed_query_sequence_[packed_text_indexes] = self.mlp(packed_query_sequence[packed_text_indexes])
             packed_query_sequence_[packed_geo_token_indexes] = self.mlp_moe_geo(packed_query_sequence[packed_geo_token_indexes])
             packed_query_sequence = packed_query_sequence_
