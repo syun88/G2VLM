@@ -1,4 +1,4 @@
-decord==0.6.0
+decord==0.6.0 ; platform_system != 'Darwin'
 einops==0.8.1
 huggingface_hub==0.29.1
 matplotlib==3.7.0
@@ -15,11 +15,12 @@ sentencepiece==0.1.99
 transformers==4.49.0
 #flash_attn==2.5.8
 accelerate>=0.34.0
+easydict
 wandb
 gradio
 setuptools
 wheel
 ninja
-bitsandbytes
-triton ; sys_platform != 'win32'
-triton-windows ; sys_platform == 'win32'
+bitsandbytes ; platform_system == 'Linux'
+triton ; platform_system == 'Linux'
+triton-windows ; platform_system == 'Windows'

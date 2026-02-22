@@ -226,13 +226,16 @@ class Dinov2WithRegistersEmbeddings(nn.Module):
         # Store original dtype for restoration after interpolation
         target_dtype = patch_pos_embed.dtype
 
+        # MPS backend does not implement bicubic antialias path (aten::_upsample_bicubic2d_aa).
+        use_antialias = patch_pos_embed.device.type != "mps"
+
         # Interpolate at float32 precision
         patch_pos_embed = nn.functional.interpolate(
             patch_pos_embed.to(dtype=torch.float32),
             size=(torch_int(height), torch_int(width)),  # Explicit size instead of scale_factor
             mode="bicubic",
             align_corners=False,
-            antialias=True,
+            antialias=use_antialias,
         ).to(dtype=target_dtype)
 
         # Validate output dimensions if not tracing

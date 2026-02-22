@@ -1,4 +1,5 @@
 import copy
+from contextlib import nullcontext
 from typing import List, Tuple, Optional
 from typing import Any, Dict, List, Mapping, Optional, Sequence 
 from typing import Callable, List, Optional, Tuple, Union
@@ -249,6 +250,16 @@ class G2VLM(PreTrainedModel):
         if self.use_registers:
             nn.init.normal_(self.register_token, std=1e-6)
 
+    def _inference_autocast_context(self):
+        if next(self.parameters()).device.type == "cuda":
+            return torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16)
+        return nullcontext()
+
+    def _force_float32_context(self):
+        if next(self.parameters()).device.type == "cuda":
+            return torch.amp.autocast(device_type="cuda", enabled=False)
+        return nullcontext()
+
     def forward(
         self,
         sequence_length: int,
@@ -481,7 +492,7 @@ class G2VLM(PreTrainedModel):
                     context = hidden.reshape(B, N, patch_h*patch_w+self.patch_start_idx, -1)[:, 0:1].repeat(1, N, 1, 1).reshape(B*N, patch_h*patch_w+self.patch_start_idx, -1)
                     global_point_hidden = self.global_points_decoder(hidden, context, xpos=pos, ypos=pos)
                 
-                with torch.amp.autocast(device_type='cuda', enabled=False):
+                with self._force_float32_context():
                     # local points
                     point_hidden = point_hidden.float()
                     ret = self.point_head([point_hidden[:, self.patch_start_idx:]], (H, W)).reshape(B, N, H, W, -1)
@@ -521,7 +532,7 @@ class G2VLM(PreTrainedModel):
                 predictions['local_points'] = local_points
                 predictions['global_points'] = global_points
 
-                with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16): 
+                with self._inference_autocast_context():
                     dl_loss, details = self.Pi3Loss(pi3_pred, batch)
 
 
@@ -1284,7 +1295,7 @@ class G2VLM(PreTrainedModel):
 
         ### return original images
         
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        with self._inference_autocast_context():
             point_hidden = self.point_decoder(hidden, xpos=pos)
             if self.conf_head is not None:
                 conf_hidden = self.conf_decoder(hidden, xpos=pos)
@@ -1294,7 +1305,7 @@ class G2VLM(PreTrainedModel):
                 global_point_hidden = self.global_points_decoder(hidden, context, xpos=pos, ypos=pos)
             
             # local points
-            with torch.amp.autocast(device_type='cuda', enabled=False):
+            with self._force_float32_context():
                 point_hidden = point_hidden.float()
                 ret = self.point_head([point_hidden[:, self.patch_start_idx:]], (H, W)).reshape(B, N, H, W, -1)
                 xy, z = ret.split([2, 1], dim=-1)
@@ -1371,7 +1382,7 @@ class G2VLM(PreTrainedModel):
         for k, v in generation_input.items():
             if torch.is_tensor(v):
                 generation_input[k] = v.to(device)
-        with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+        with self._inference_autocast_context():
             past_key_values = self.forward_cache_update_text(past_key_values, **generation_input)
 
         print('Prepareing dino images ')
@@ -1387,10 +1398,10 @@ class G2VLM(PreTrainedModel):
         for k, v in generation_input.items():
             if torch.is_tensor(v):
                 generation_input[k] = v.to(device)
-        with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+        with self._inference_autocast_context():
             past_key_values, last_hidden_state = self.forward_cache_update_dino(past_key_values, **generation_input)
 
-        with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+        with self._inference_autocast_context():
             predictions_dict = self.reconstruct(
                 past_key_values=past_key_values,
                 selected_hidden_states=last_hidden_state,
@@ -1440,7 +1451,7 @@ class G2VLM(PreTrainedModel):
         for k, v in generation_input.items():
             if torch.is_tensor(v):
                 generation_input[k] = v.to(device)
-        with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+        with self._inference_autocast_context():
             past_key_values = self.forward_cache_update_text(past_key_values, **generation_input)
 
         # add images
@@ -1457,11 +1468,11 @@ class G2VLM(PreTrainedModel):
         for k, v in generation_input.items():
             if torch.is_tensor(v):
                 generation_input[k] = v.to(device)
-        with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+        with self._inference_autocast_context():
             past_key_values, last_hidden_state = self.forward_cache_update_dino(past_key_values, **generation_input)
 
         # recon 
-        with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+        with self._inference_autocast_context():
             predictions_dict = self.reconstruct(
                 past_key_values=past_key_values,
                 max_length=max_length,
@@ -1513,7 +1524,7 @@ class G2VLM(PreTrainedModel):
         for k, v in generation_input.items():
             if torch.is_tensor(v):
                 generation_input[k] = v.to(device)
-        with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+        with self._inference_autocast_context():
             past_key_values = self.forward_cache_update_text(past_key_values, **generation_input)
             
         generation_input, newlens, new_rope = self.prepare_dino_images_pi3(
@@ -1528,7 +1539,7 @@ class G2VLM(PreTrainedModel):
             if torch.is_tensor(v):
                 generation_input[k] = v.to(device)
                 tmp_save[k] = v.to(device)
-        with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+        with self._inference_autocast_context():
             past_key_values, last_hidden_state = self.forward_cache_update_dino(past_key_values, **generation_input)
             
         for image in images:
@@ -1543,7 +1554,7 @@ class G2VLM(PreTrainedModel):
             for k, v in generation_input.items():
                 if torch.is_tensor(v):
                     generation_input[k] = v.to(device)
-            with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+            with self._inference_autocast_context():
                 past_key_values = self.forward_cache_update_vit(past_key_values, **generation_input)
 
         # add text  
@@ -1558,7 +1569,7 @@ class G2VLM(PreTrainedModel):
         for k, v in generation_input.items():
             if torch.is_tensor(v):
                 generation_input[k] = v.to(device)
-        with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+        with self._inference_autocast_context():
             past_key_values = self.forward_cache_update_text(past_key_values, **generation_input)
 
 
@@ -1567,7 +1578,7 @@ class G2VLM(PreTrainedModel):
         for k, v in generation_input.items():
             if torch.is_tensor(v):
                 generation_input[k] = v.to(device)
-        with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+        with self._inference_autocast_context():
             unpacked_latent = self.generate_text(
                 past_key_values=past_key_values,
                 max_length=max_length,

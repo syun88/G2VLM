@@ -4,7 +4,7 @@ __pycache__
 *.pyc
 *.egg-info
 dist
-
+.venv/
 # Log
 *.log
 *.log.*
@@ -44,7 +44,7 @@ ckpts*
 
 # Demo
 serve_images/
-
+models/
 data/preprocessing/recon/saved_images/
 data/preprocessing/recon/ceph_data/arkitscenes_pairs
 finetune_data/saved_images/

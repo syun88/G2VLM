@@ -25,7 +25,7 @@ from typing import Callable, Optional
 import numpy as np
 import torch
 from torch import nn
-from flash_attn import flash_attn_varlen_func
+from modeling.flash_attn_compat import flash_attn_varlen_func
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.modeling_utils import PreTrainedModel
