@@ -87,11 +87,25 @@ cd G2VLM
 conda create -n g2vlm python=3.10 -y
 conda activate g2vlm
 
+# Linux (NVIDIA CUDA 12.1)
 pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+
+# macOS (Apple Silicon / Intel) or CPU-only environment
+# pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1
+
 pip install -r requirements.txt
 ```
 
-Optional: For training
+On macOS, install PyTorch without CUDA wheels:
+```bash
+pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1
+pip install -r requirements.txt
+```
+
+Note for macOS: `decord` is skipped in `requirements.txt` because pip wheels are not provided for macOS.  
+This does not affect image-based inference (`inference_chat.py` / `inference_recon.py`).
+
+Optional: For training (Linux + CUDA only)
 ```bash
 pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
 ```
@@ -123,6 +137,9 @@ Here is the script for 3D recontruction.
 # Run with default example images
 python inference_recon.py
 
+# macOS (recommended)
+python inference_recon.py --device cpu
+
 # Run on your own data (image folder)
 python inference_recon.py --image_folder <path/to/your/images_dir>
 ```
@@ -132,6 +149,9 @@ Here is the script for spatial reasoning task. We encourage to try spatial reaso
 ```bash
 # Run with default example images and default question
 python inference_chat.py
+
+# macOS (recommended)
+python inference_chat.py --device cpu
 
 # Run on your own data (image folder) and question
 python inference_chat.py --image_path <path/to/your/images> --question "user question"
@@ -170,4 +190,3 @@ G<sup>2</sup>VLM is licensed under the Apache 2.0.
 - [Bagel](https://github.com/ByteDance-Seed/Bagel): Our codebase is built upon Bagel.
 - [Pi3](https://github.com/yyfz/Pi3): We develop our visual geometric expert based on Pi3.
 - [VGGT](https://github.com/facebookresearch/vggt): We thank VGGT for their efforts in visual geometry learning.
-
